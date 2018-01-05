@@ -99,6 +99,82 @@ def set_style():
 
     matplotlib.rcParams['svg.fonttype'] = 'none'
 
+
+class SequenceSummary():
+    def __init__(self, snp_array,FDR=.01, error_rate=1e-3, depth_cutoff=10):
+        """Computes two statistics from the SNP pileup.
+        First, it defines the major allele at each positions as the allele present at
+        the highest average allele proportion across the populations. It
+
+        Second, it estimates the proportion of samples that contain a variant allele at a
+        position in at least one repeat unit. Variant alleles are called by rejecting
+        the null hypothesis that all observed variants are sequencing errors using a
+        conservative error rate epsilon (the minimum quality score). This does not account for
+        errors introduced by PCR, which may be important. For each position i in
+        sample j total read count X_ij and variant read count k_ij are determined. We
+        define the variant allele as the allele with the second greatest average allelw
+        proportion. The null model is:
+
+        k_ij ~ Binom(X_ij, epsilon)
+
+        A p-value is computed for each sample and the null hypothesis is (or isn't)
+        rejected using the Benjami-Hochsberg multiple testing correction for the
+        number of samples at the given FDR (default .01). Note, this null model does
+        not account for PCR-duplicates, and the assumption of a simple sampling
+        distribution is usually simplistic.
+
+        Parameters:
+            snp_array: the I x J x K 3-dimensional snp pileup array
+
+            FDR: Accepted false-discovery rate for a position.
+
+            error_rate: The expected rate of sequencing errors. For base-calling errors,
+            the default is 1e-3, which corresponds to lowest Phred quality score considered
+            when ConTExt builds SNP pileups (30).
+
+            depth_cutoff: A statistic will only be computed for a consensus position
+            if the read depth at the position is higher than the cutoff in every sample.
+
+        Returns:
+            An object with the following attributes:
+            major_allele_proportion: An I x K array indicating the major allele proportion
+            at positon k in sample i
+
+            allele_frequency: A length K array containing the fraction of samples containing a
+            variant allele in at least one repeat unit for each position
+
+            passed_positions: The indices of consensus allele positions which survive
+            the read depth cutoff
+
+            major_allele: The major allele at each position"""
+        samples=snp_array.shape[0]
+        read_count=snp_array[:,:,:] .sum(1)
+    ##    print read_count.shape
+
+
+        major_allele_prop,major_allele, all_pos=GetMajorAlleleFreq(snp_array, cutoff=depth_cutoff)
+        var_allele_prop=GetOtherAlleleProportion(snp_array, depth_cutoff, order=2)
+        read_count=read_count[:,all_pos]
+        var_counts=(read_count*var_allele_prop).astype(int)
+        read_count=read_count.astype(int)
+        min_cvg= numpy.min(read_count,0)
+        allele_freq=[]
+        var_pres=[]
+
+        for i in range(read_count.shape[1]):
+            p_vals=(1.- scipy.stats.binom.cdf(var_counts[:,i], read_count[:,i], error_rate))
+    ##        p_vals=(1.- scipy.stats.binom.cdf(snp_array[:,:,i], read_count[:,i][:,None], error_rate))
+    ##        print p_vals.shape
+            rej,q_vals,sidak, bonf=statsmodels.stats.multitest.multipletests(p_vals,FDR, method='fdr_bh')
+            allele_freq.append(float( rej.sum()) /samples)
+            var_pres.append(rej)
+
+        self.major_allele_proportion = major_allele_prop
+        self.allele_frequency = numpy.array( allele_freq)
+        self.variant_table = numpy.array( var_pres).transpose()
+        self.passed_positions =  all_pos
+        self.major_allele = major_allele
+
 ##class ConTExtLine():
 ##    strand={'0':'+', '16':'-', '4':'*', 'strand': '*'}
 ##    def __init__(self, row):
@@ -560,12 +636,18 @@ def ComputeFst(snp_array,ax =0 , pop=colors):
     return fst
 
 
+def AnovaOnPCA(PCA):
+    pop_samples=[]
+    for p in set(colors):
+        pop_samples.append((PCA[colors==p, :3]))
+    return scipy.stats.f_oneway(*pop_samples)
+
 def PlotPCA(data,pos=[], lin_method=None, colors=COlorBlindColors( colors), plot=True, partial_fit=False):
 ##    data=data[numpy.array( good_ind),:]
     if samples!='':
         print 'b'
         keep_ind=numpy.array( [bad_strains.count(s)==0 for s in samples])
-##        colors=numpy.array(colors)[keep_ind]
+        colors=numpy.array(colors)
         data=data
         nan_ind=numpy.isnan(data.sum(1))
 ##        data=data[~nan_ind,:]
@@ -576,7 +658,7 @@ def PlotPCA(data,pos=[], lin_method=None, colors=COlorBlindColors( colors), plot
 
         pca=sklearn.decomposition.PCA(92,whiten=True, copy=False)
 ##    if partial_fit==False:
-    transformed=pca.fit_transform(AlleleRescale( data))
+    transformed=pca.fit_transform(AlleleRescale( data[keep_ind]))
     if plot==True:
         pyplot.scatter(transformed[:,0], transformed[:,1], c=colors)
         pyplot.gca().set_aspect('equal')
@@ -636,10 +718,10 @@ def PlotPCA(data,pos=[], lin_method=None, colors=COlorBlindColors( colors), plot
     ##            pyplot.plot(numpy.cumsum( sorted(list(abs( lin_fit.coef_[i])) )))
                 pyplot.show()
     else:
-        lin_fit=transformed.components_
-        return pca, lin_fit, AlleleRescale(data)
+        lin_fit=pca.components_
+        return transformed, pca, lin_fit, AlleleRescale(data)
 
-    return pca, lin_fit, AlleleRescale(data)
+    return transformed, pca, lin_fit, AlleleRescale(data)
 
 
 def ExplainPCs(pca, data, n=3, method='EN'):

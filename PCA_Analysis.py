@@ -253,7 +253,7 @@ path to such a file in the sample_file parameter."
             lin_fit=pca.components_
 
 
-        self.components, self.PCA, self.contributions, self.rescaled= transformed, pca, lin_fit.coef_, AlleleRescale(data)
+        self.components, self.PCA, self.contributions, self.rescaled= transformed, pca, lin_fit, AlleleRescale(data)
 
     def PlotScree(self):
         assert hasattr(self, 'PCA'), "The PerformPCA() method must be run before plotting PCA summaries."

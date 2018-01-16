@@ -101,7 +101,7 @@ def set_style():
 
 
 class SequenceSummary():
-    def __init__(self, snp_array,FDR=.01, error_rate=1e-3, depth_cutoff=10):
+    def __init__(self, infile,ignore=ignore,sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=10, nan_filter=True):
         """Computes two statistics from the SNP pileup.
         First, it defines the major allele at each positions as the allele present at
         the highest average allele proportion across the populations. It
@@ -147,7 +147,36 @@ class SequenceSummary():
             the read depth cutoff
 
             major_allele: The major allele at each position"""
-        samples=snp_array.shape[0]
+        #Determine the parent directory
+        if sample_file=='':
+            indir='/'.join( infile.split('/')[:-1])
+            sample_file=indir+'/samples.tsv'
+
+        assert os.path.exists(sample_file)==True, "This function requires a comma separated list of samples labels \
+in the same order as in the pile-up table. If the input's parent directory \
+does not contain a such a file named samples.tsv, please specify the \
+path to such a file in the sample_file parameter."
+
+        self.samples=numpy.loadtxt(sample_file, str)
+
+
+        snp_array=numpy.load(infile)
+        if type( ignore)==str:
+            assert os.path.exists(sample_file)==True, "A string was passed to the 'ignore' parameter,\
+            but this was not a valid path."
+            ignore=numpy.loadtxt(ignore, str)
+
+        if ignore!=[]:
+            good_indices=~numpy.isin(samples, ignore)
+            snp_array=snp_array[good_ind]
+            self.samples=self.samples[good_ind]
+
+
+        if type( pop_rule)==str:
+            #File path
+            pass
+        self.pop=numpy.array( [s[:pop_rule] for s in samples])
+        num_samples=snp_array.shape[0]
         read_count=snp_array[:,:,:] .sum(1)
     ##    print read_count.shape
 
@@ -166,15 +195,207 @@ class SequenceSummary():
     ##        p_vals=(1.- scipy.stats.binom.cdf(snp_array[:,:,i], read_count[:,i][:,None], error_rate))
     ##        print p_vals.shape
             rej,q_vals,sidak, bonf=statsmodels.stats.multitest.multipletests(p_vals,FDR, method='fdr_bh')
-            allele_freq.append(float( rej.sum()) /samples)
+            allele_freq.append(float( rej.sum()) /num_samples)
             var_pres.append(rej)
 
+        self.pileup=snp_array
         self.major_allele_proportion = major_allele_prop
+        self.nan_filter=~numpy.isnan(self.major_allele_proportion).sum(1)
         self.allele_frequency = numpy.array( allele_freq)
         self.variant_table = numpy.array( var_pres).transpose()
         self.passed_positions =  all_pos
         self.major_allele = major_allele
+        self.FST=ComputeFst(self.pileup, self.pop)
 
+    def PerformPCA(self, selection_method=None, colors=colors, nan_filter=True):
+    ##    data=data[numpy.array( good_ind),:]
+        self.colors=COlorBlindColors( colors)
+        data=self.major_allele_proportion
+        pos=self.passed_positions
+        if nan_filter==True:
+            #We are worried about nans
+            data=data[self.nan_filter,:]
+        if samples!='':
+            print 'b'
+            keep_ind=numpy.array( [bad_strains.count(s)==0 for s in samples])
+            colors=numpy.array(colors)
+            data=data
+            nan_ind=numpy.isnan(data.sum(1))
+    ##        data=data[~nan_ind,:]
+    ##        pca=sklearn.decomposition.IncrementalPCA(92-len(bad_strains),whiten=True, copy=False,batch_size= 100)
+
+            pca=sklearn.decomposition.PCA(data.shape[0],whiten=True, copy=False)
+        else:
+
+            pca=sklearn.decomposition.PCA(data.shape[0],whiten=True, copy=False)
+    ##    if partial_fit==False:
+        transformed=pca.fit_transform(AlleleRescale( data))
+
+
+
+
+        if selection_method!=None:
+            lin_fit=ExplainPCs(transformed, AlleleRescale(data),3, method=selection_method)
+            for i in range(3):
+    ##            pyplot.plot(pos,lin_fit[i].coef_.transpose(), alpha=.9)
+
+                if plot==True:
+                    if selection_method!='RL':
+                        pyplot.plot(lin_fit[i].coef_.transpose(), alpha=.9)
+                    else: pyplot.plot(lin_fit[i].scores_.transpose(), alpha=.9)
+
+        ##            pyplot.plot(pos, lin_fit[i].scores_)
+                    pyplot.show()
+        ##            pyplot.plot(numpy.cumsum( sorted(list(abs( lin_fit.coef_[i])) )))
+                    pyplot.show()
+
+        else:
+            lin_fit=pca.components_
+
+
+        self.components, self.PCA, self.contributions, self.rescaled= transformed, pca, lin_fit, AlleleRescale(data)
+
+    def PlotScree(self):
+        assert hasattr(self, 'PCA'), "The PerformPCA() method must be run before plotting PCA summaries."
+
+        pyplot.plot(range(1 , len( self.PCA.explained_variance_)+1),self.PCA.explained_variance_ratio_, lw=2, c='forestgreen', alpha=.9)
+
+        pyplot.ylabel('Variance Explained')
+        pyplot.xlabel('Component')
+
+##        pyplot.show()
+    def PlotPCA(self, comp1=1, comp2=2):
+        assert hasattr(self, 'PCA'), "The PerformPCA() method must be run before plotting PCA summaries."
+        comp1-=1
+        comp2-=1
+        transformed=self.components
+        pca=self.PCA
+        pyplot.scatter(transformed[:,comp1], transformed[:,comp2], c=colors)
+        pyplot.gca().set_aspect('equal')
+##        pyplot.show()
+##        trans_2=pca.fit_transform(AlleleRescale( data).transpose())
+##        pyplot.scatter(pca.components_[0,:], pca.c//omponents_[1,:], c=colors, s=80, alpha=.7)
+        pyplot.xlabel('PC{0} ({1}%)'.format(comp1+1, numpy.round( pca.explained_variance_ratio_[comp1]*100, 3)))
+        pyplot.ylabel('PC{0} ({1}%)'.format(comp2+1, numpy.round( pca.explained_variance_ratio_[comp2]*100, 3)))
+        pyplot.gca().set_aspect('equal')
+##        pyplot.show()
+
+    def PlotPCA3D(self, comp1=1, comp2=2, comp3=3):
+        assert hasattr(self, 'PCA'), "The PerformPCA() method must be run before plotting PCA summaries."
+        comp1-=1
+        comp2-=1
+        comp3-=1
+        transformed=self.components
+        pca=self.PCA
+        fig=pyplot.figure()
+        ax=mplot3d.axes3d.Axes3D(fig)
+        ax.scatter(transformed[:,0], transformed[:,1],transformed[:,2], c=colors, s=60)
+
+        ax.set_xlabel('PC{0} ({1}%)'.format(comp1+1, numpy.round( pca.explained_variance_ratio_[comp1]*100, 3)))
+        ax.set_ylabel('PC{0} ({1}%)'.format(comp2+1, numpy.round( pca.explained_variance_ratio_[comp2]*100, 3)))
+        ax.set_zlabel('PC{0} ({1}%)'.format(comp3+1, numpy.round( pca.explained_variance_ratio_[comp3]*100, 3)))
+##        pyplot.show()
+
+    def PlotContributions(self, component=1):
+        component-=1
+        pyplot.plot(self.contributions [component], alpha=.9)
+##        pyplot.show()
+        ##            pyplot.plot(numpy.cumsum( sorted(list(abs( lin_fit.coef_[i])) )))
+    def SelectFeatures(self):
+        """Not implemented."""
+
+        pass
+    def Biplot(self, pc1, pc2, head_mod=2, lw=1,alpha=.2, ax=None):
+        pca=self.PCA
+        lin_fit=self.contributions
+        rel_ind=((lin_fit[0]!=0)+ (lin_fit[1]!=0) +(lin_fit[2]!=0))>0
+        indices=numpy.where(rel_ind==True)[0]
+        ax=pyplot.gca()
+        seaborn.set_style('white')
+        ax.set_aspect('equal')
+    ##    ax.grid(False)
+
+        ax.scatter(pca.components_[pc1,:],pca.components_[pc2,:], c=colors, s=20, alpha=.9, zorder=2 )
+        scale_1=numpy.max(abs(pca.components_[pc1,:]))/(numpy.max(abs( lin_fit[pc1])))
+        scale_2=numpy.max(abs(pca.components_[pc2,:]))/(numpy.max(abs( lin_fit[pc2])))
+        scale=min(scale_1,scale_2)
+        for ind in indices:
+            ax.plot([0,-1*lin_fit[pc1][ind]*scale],[0,-1* lin_fit[pc2][ind]*scale], c='grey', alpha=.01, zorder=3)
+            ax.arrow(0,0,-1*lin_fit[pc1][ind]*scale,-1* lin_fit[pc2][ind]*scale,lw=lw, head_width=0.005*head_mod, head_length=0.01*head_mod,color='black', alpha=alpha, zorder=3)
+
+
+        pyplot.xticks(size=14)
+        pyplot.yticks(size=14)
+        pyplot.xlabel('PC{0} ({1:.1f}%)'.format (pc1+1, numpy.round( pca.explained_variance_ratio_[pc1]*100, 3)), size=16)
+        pyplot.ylabel('PC{0} ({1:.1f}%)'.format (pc2+1, numpy.round( pca.explained_variance_ratio_[pc2]*100, 3)), size=16)
+
+
+    def BuildSequenceVariantTable(self,outfile, seq):
+        rel_ind=numpy.where( self.allele_frequency>0)[0]
+        #local variables
+    ##    ind=numpy.array(good_ind)
+        nt_dict={'A':1, 'T':2, 'C':3,'G':4}
+        nt_classes={'A':'PUR', 'T':'PYR', 'C':'PYR','G':'PUR'}
+        mut_classes={True:'Transition', False:'Transversion'}
+        inv_nt_dict={1:'A', 2:'T', 3:'C',4:'G'}
+        array=numpy.copy( self.pileup[:,:,:])
+        array/=array.sum(1)[:,None,:]
+
+        workbook=xlsxwriter.Workbook(outfile)
+        worksheet=workbook.add_worksheet()
+
+        int_format=workbook.add_format()
+        int_format.set_num_format('#,##0')
+
+        float_format=workbook.add_format()
+        float_format.set_num_format('0.00E+00')
+
+    ##    rel_ind=((lin_fit[0].coef_!=0)+ (lin_fit[1].coef_!=0) +(lin_fit[2].coef_!=0))>0
+        lin_indices=numpy.where(rel_ind==True)[0]
+        relevant_positions=self.passed_positions[rel_ind]
+        mean_major=numpy.mean(self.major_allele_proportion[:,rel_ind],0)
+        std_major=numpy.std(self.major_allele_proportion[:,rel_ind],0)
+        min_major=numpy.min(self.major_allele_proportion[:,rel_ind],0)
+        var_freq=self.allele_frequency[rel_ind]
+    ##    fst=ComputeFst(table)[relevant_positions]
+        row=2
+    ##    worksheet.write(0,0, 'Sequence Information')
+    ##    worksheet.write(0,3, 'Regression Coefficients')
+        header=['Position',	'Consensus',	'Variant','Type' ,	'Mean', 'Std', 'Min', 'Freq', 'Fst']
+        for column in range(6):
+            worksheet.write(1, column, header[column])
+        for index in range(len( relevant_positions)):
+            column=0
+            pos=relevant_positions[index]
+            cons_allele=seq[pos-1]      #Pile-up is 1-coordinate, consensus positions are 0-coordinate. CXOnvert to zero.
+            cons_index=nt_dict[cons_allele]
+            mean_freq=numpy.mean(array[:,:,pos],0)
+            mean_freq[0]=0.
+            mean_freq[cons_index]=0.
+            try:
+                major_var_ind=numpy.argmax(mean_freq)
+                var_allele=inv_nt_dict[major_var_ind]
+            except:
+                print mean_freq
+                print major_var_ind
+                print array[:,:,pos]
+                continue
+            mut_type=mut_classes[nt_classes[cons_allele]==nt_classes[var_allele]]
+            entries=[pos, cons_allele, var_allele, mut_type, mean_major[index], std_major[index],min_major[index],var_freq[index]]#, fst[index] ]#,  lin_fit[0].coef_[lin_indices[index]], lin_fit[1].coef_[lin_indices[index]], lin_fit[2].coef_[lin_indices[index]]]
+            for item in entries:
+                if column==0: cell_format=int_format
+                else: cell_format=float_format
+                worksheet.write(row, column,item, cell_format )
+                column+=1
+            row+=1
+        merge_format = workbook.add_format({
+        'bold': 1,
+        'border': 1,
+        'align': 'center',
+        'valign': 'vcenter'})
+        worksheet.merge_range('A1:D1', 'Sequence Information', merge_format)
+        worksheet.merge_range('E1:G1', 'Regression Coefficients', merge_format)
+        workbook.close()
 ##class ConTExtLine():
 ##    strand={'0':'+', '16':'-', '4':'*', 'strand': '*'}
 ##    def __init__(self, row):
@@ -285,6 +506,8 @@ class LassoManager(object):
 ##
 ##        ax.add_collection(self.collection[-1])
 
+def UpdateTable(table):
+    return numpy.vstack((samples, table))
 
 #Functions for a
 
@@ -555,27 +778,6 @@ def PlotBiplotPanel(pcas, shape, titles=[],pc=(0,1), colors=COlorBlindColors(col
 
     return  fig,gs, ax_list, leg
 
-def Biplot(pca, lin_fit, pc1=0, pc2=1, head_mod=2, lw=1,alpha=.2, colors=COlorBlindColors( colors), ax=None):
-    rel_ind=((lin_fit[0].coef_!=0)+ (lin_fit[1].coef_!=0) +(lin_fit[2].coef_!=0))>0
-    indices=numpy.where(rel_ind==True)[0]
-    ax=pyplot.gca()
-    seaborn.set_style('white')
-    ax.set_aspect('equal')
-##    ax.grid(False)
-
-    ax.scatter(pca.components_[pc1,:],pca.components_[pc2,:], c=colors, s=20, alpha=.9, zorder=2 )
-    scale_1=numpy.max(abs(pca.components_[pc1,:]))/(numpy.max(abs( lin_fit[pc1].coef_)))
-    scale_2=numpy.max(abs(pca.components_[pc2,:]))/(numpy.max(abs( lin_fit[pc2].coef_)))
-    scale=min(scale_1,scale_2)
-    for ind in indices:
-        ax.plot([0,-1*lin_fit[pc1].coef_[ind]*scale],[0,-1* lin_fit[pc2].coef_[ind]*scale], c='grey', alpha=.01, zorder=3)
-        ax.arrow(0,0,-1*lin_fit[pc1].coef_[ind]*scale,-1* lin_fit[pc2].coef_[ind]*scale,lw=lw, head_width=0.005*head_mod, head_length=0.01*head_mod,color='black', alpha=alpha, zorder=3)
-
-
-    pyplot.xticks(size=14)
-    pyplot.yticks(size=14)
-    pyplot.xlabel('PC{0} ({1:.1f}%)'.format (pc1+1, numpy.round( pca.explained_variance_ratio_[pc1]*100, 3)), size=16)
-    pyplot.ylabel('PC{0} ({1:.1f}%)'.format (pc2+1, numpy.round( pca.explained_variance_ratio_[pc2]*100, 3)), size=16)
 ##    pyplot.tight_layout()
 
 
@@ -642,7 +844,7 @@ def AnovaOnPCA(PCA):
         pop_samples.append((PCA[colors==p, :3]))
     return scipy.stats.f_oneway(*pop_samples)
 
-def PlotPCA(data,pos=[], lin_method=None, colors=COlorBlindColors( colors), plot=True, partial_fit=False):
+def PlotPCA(data,pos=[], selection_method=None, colors=COlorBlindColors( colors), plot=True, partial_fit=False):
 ##    data=data[numpy.array( good_ind),:]
     if samples!='':
         print 'b'
@@ -703,13 +905,13 @@ def PlotPCA(data,pos=[], lin_method=None, colors=COlorBlindColors( colors), plot
         pyplot.xlabel('Component')
         pyplot.show()
 
-    if lin_method!=None:
-        lin_fit=ExplainPCs(transformed, AlleleRescale(data),3, method=lin_method)
+    if selection_method!=None:
+        lin_fit=ExplainPCs(transformed, AlleleRescale(data),3, method=selection_method)
         for i in range(3):
 ##            pyplot.plot(pos,lin_fit[i].coef_.transpose(), alpha=.9)
 
             if plot==True:
-                if lin_method!='RL':
+                if selection_method!='RL':
                     pyplot.plot(lin_fit[i].coef_.transpose(), alpha=.9)
                 else: pyplot.plot(lin_fit[i].scores_.transpose(), alpha=.9)
 
@@ -1914,71 +2116,6 @@ def PlotFstBoxplot(samples,lin_fits, labels):
     pyplot.show()
 
 
-def BuildSequenceVariantTable(outfile, table,summaries, positions, rel_ind, seq):
-    #local variables
-##    ind=numpy.array(good_ind)
-    nt_dict={'A':1, 'T':2, 'C':3,'G':4}
-    nt_classes={'A':'PUR', 'T':'PYR', 'C':'PYR','G':'PUR'}
-    mut_classes={True:'Transition', False:'Transversion'}
-    inv_nt_dict={1:'A', 2:'T', 3:'C',4:'G'}
-    array=numpy.copy( table[:,:,:])
-    array/=array.sum(1)[:,None,:]
-
-    workbook=xlsxwriter.Workbook(outfile)
-    worksheet=workbook.add_worksheet()
-
-    int_format=workbook.add_format()
-    int_format.set_num_format('#,##0')
-
-    float_format=workbook.add_format()
-    float_format.set_num_format('0.00E+00')
-
-##    rel_ind=((lin_fit[0].coef_!=0)+ (lin_fit[1].coef_!=0) +(lin_fit[2].coef_!=0))>0
-    lin_indices=numpy.where(rel_ind==True)[0]
-    relevant_positions=positions[rel_ind]
-    mean_major=numpy.mean(summaries[0][:,rel_ind],0)
-    std_major=numpy.std(summaries[0][:,rel_ind],0)
-    min_major=numpy.min(summaries[0][:,rel_ind],0)
-    var_freq=summaries[1][rel_ind]
-##    fst=ComputeFst(table)[relevant_positions]
-    row=2
-##    worksheet.write(0,0, 'Sequence Information')
-##    worksheet.write(0,3, 'Regression Coefficients')
-    header=['Position',	'Consensus',	'Variant','Type' ,	'Mean', 'Std', 'Min', 'Freq', 'Fst']
-    for column in range(6):
-        worksheet.write(1, column, header[column])
-    for index in range(len( relevant_positions)):
-        column=0
-        pos=relevant_positions[index]
-        cons_allele=seq[pos-1]      #Pile-up is 1-coordinate, consensus positions are 0-coordinate. CXOnvert to zero.
-        cons_index=nt_dict[cons_allele]
-        mean_freq=numpy.mean(array[:,:,pos],0)
-        mean_freq[0]=0.
-        mean_freq[cons_index]=0.
-        try:
-            major_var_ind=numpy.argmax(mean_freq)
-            var_allele=inv_nt_dict[major_var_ind]
-        except:
-            print mean_freq
-            print major_var_ind
-            print array[:,:,pos]
-            continue
-        mut_type=mut_classes[nt_classes[cons_allele]==nt_classes[var_allele]]
-        entries=[pos, cons_allele, var_allele, mut_type, mean_major[index], std_major[index],min_major[index],var_freq[index]]#, fst[index] ]#,  lin_fit[0].coef_[lin_indices[index]], lin_fit[1].coef_[lin_indices[index]], lin_fit[2].coef_[lin_indices[index]]]
-        for item in entries:
-            if column==0: cell_format=int_format
-            else: cell_format=float_format
-            worksheet.write(row, column,item, cell_format )
-            column+=1
-        row+=1
-    merge_format = workbook.add_format({
-    'bold': 1,
-    'border': 1,
-    'align': 'center',
-    'valign': 'vcenter'})
-    worksheet.merge_range('A1:D1', 'Sequence Information', merge_format)
-    worksheet.merge_range('E1:G1', 'Regression Coefficients', merge_format)
-    workbook.close()
 
 def ComparePCAtoRegression(freq, pca, lin_fit):
     ind=numpy.array(good_ind)

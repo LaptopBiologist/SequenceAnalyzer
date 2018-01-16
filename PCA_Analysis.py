@@ -101,7 +101,7 @@ def set_style():
 
 
 class SequenceSummary():
-    def __init__(self, infile,ignore=ignore,sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=10, nan_filter=True):
+    def __init__(self, infile,ignore=bad_strains,sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=10, nan_filter=True):
         """Computes two statistics from the SNP pileup.
         First, it defines the major allele at each positions as the allele present at
         the highest average allele proportion across the populations. It

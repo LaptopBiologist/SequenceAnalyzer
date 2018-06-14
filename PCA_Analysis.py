@@ -101,7 +101,7 @@ def set_style():
 
 
 class SequenceSummary():
-    def __init__(self, infile,ignore=ignore,sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=10, nan_filter=True):
+    def __init__(self, infile,ignore=[],sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=1, nan_filter=True):
         """Computes two statistics from the SNP pileup.
         First, it defines the major allele at each positions as the allele present at
         the highest average allele proportion across the populations. It
@@ -159,23 +159,27 @@ path to such a file in the sample_file parameter."
 
         self.samples=numpy.loadtxt(sample_file, str)
 
-
+        print len( self.samples)
         snp_array=numpy.load(infile)
         if type( ignore)==str:
             assert os.path.exists(sample_file)==True, "A string was passed to the 'ignore' parameter,\
             but this was not a valid path."
             ignore=numpy.loadtxt(ignore, str)
-
+        print self.samples
         if ignore!=[]:
             good_indices=~numpy.isin(samples, ignore)
-            snp_array=snp_array[good_ind]
-            self.samples=self.samples[good_ind]
-
-
+            snp_array=snp_array[good_indices]
+            self.samples=self.samples[good_indices]
+    #Check for samples without the repeat
+        read_counts=numpy.mean( snp_array.sum(1),1)
+        good_indices=read_counts>=10
+        snp_array=snp_array[good_indices]
+        self.samples=self.samples[good_indices]
         if type( pop_rule)==str:
             #File path
             pass
-        self.pop=numpy.array( [s[:pop_rule] for s in samples])
+        self.pop=numpy.array( [s[:pop_rule] for s in self.samples])
+        print len(self.pop)
         num_samples=snp_array.shape[0]
         read_count=snp_array[:,:,:] .sum(1)
     ##    print read_count.shape
@@ -199,29 +203,32 @@ path to such a file in the sample_file parameter."
             var_pres.append(rej)
 
         self.pileup=snp_array
+        print self.pileup.shape
         self.major_allele_proportion = major_allele_prop
-        self.nan_filter=~numpy.isnan(self.major_allele_proportion).sum(1)
+        self.nan_filter=~numpy.isnan(self.major_allele_proportion.sum(0))
+##        print self.pop
         self.allele_frequency = numpy.array( allele_freq)
         self.variant_table = numpy.array( var_pres).transpose()
         self.passed_positions =  all_pos
         self.major_allele = major_allele
-        self.FST=ComputeFst(self.pileup, self.pop)
+##        self.FST=ComputeFst(self.pileup, self.pop)
 
-    def PerformPCA(self, selection_method=None, colors=colors, nan_filter=True):
+    def PerformPCA(self, selection_method=None, colors=colors, nan_filter=False):
     ##    data=data[numpy.array( good_ind),:]
         self.colors=COlorBlindColors( colors)
         data=self.major_allele_proportion
         pos=self.passed_positions
         if nan_filter==True:
             #We are worried about nans
-            data=data[self.nan_filter,:]
+            data=data[:,self.nan_filter]
         if samples!='':
             print 'b'
-            keep_ind=numpy.array( [bad_strains.count(s)==0 for s in samples])
+            keep_ind=numpy.array( [bad_strains.count(s)==0 for s in self.samples])
             colors=numpy.array(colors)
             data=data
-            nan_ind=numpy.isnan(data.sum(1))
-    ##        data=data[~nan_ind,:]
+            nan_ind=numpy.isnan(data.sum(0))
+
+##            data=data[:,~nan_ind]
     ##        pca=sklearn.decomposition.IncrementalPCA(92-len(bad_strains),whiten=True, copy=False,batch_size= 100)
 
             pca=sklearn.decomposition.PCA(data.shape[0],whiten=True, copy=False)
@@ -1720,6 +1727,7 @@ def GetMajorAlleleFreq(snp_array, cutoff=10):
 ##    pyplot.plot(min_cvg)
 ##    pyplot.show()
     good_ind=min_cvg>=cutoff
+    print good_ind
     freq_table=snp_array/snp_array.sum(1)[:,None,:]
     pop_avg=numpy.mean(freq_table,0)
     ind=numpy.argmax(pop_avg,0)

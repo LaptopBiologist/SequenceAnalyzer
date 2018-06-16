@@ -41,7 +41,10 @@ from matplotlib import path
 import matplotlib.pyplot as plt
 from numpy import nonzero
 from numpy.random import rand
-
+try:
+    import wpca
+except:
+    pass
 ##matplotlib.interactive(True)
 
 colors=numpy.array( ['firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'firebrick', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'forestgreen', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'blue', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'orange', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple', 'purple'])
@@ -101,7 +104,7 @@ def set_style():
 
 
 class SequenceSummary():
-    def __init__(self, infile,ignore=[],sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=1, nan_filter=True):
+    def __init__(self, infile,ignore=[],sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=1,mean_cutoff=0, nan_filter=True):
         """Computes two statistics from the SNP pileup.
         First, it defines the major allele at each positions as the allele present at
         the highest average allele proportion across the populations. It
@@ -172,7 +175,7 @@ path to such a file in the sample_file parameter."
             self.samples=self.samples[good_indices]
     #Check for samples without the repeat
         read_counts=numpy.mean( snp_array.sum(1),1)
-        good_indices=read_counts>=10
+        good_indices=read_counts>=mean_cutoff
         snp_array=snp_array[good_indices]
         self.samples=self.samples[good_indices]
         if type( pop_rule)==str:
@@ -213,7 +216,28 @@ path to such a file in the sample_file parameter."
         self.major_allele = major_allele
 ##        self.FST=ComputeFst(self.pileup, self.pop)
 
-    def PerformPCA(self, selection_method=None, colors=colors, nan_filter=False):
+    def ComputeWeights(self):
+        N=self.pileup.sum(1)
+        k=N*self.major_allele_proportion
+        a=1+k
+        b=1+N-k
+        variance=(a*b)/((a+b+1)*(a+b)**2)
+        p=self.major_allele_proportion
+        q=1.+p
+        se=(1/N)**.5
+
+        self.weights=1./variance**.5
+##        self.weights=1./se
+        nan_ind=numpy.isnan(self.major_allele_proportion)
+        self.weights[nan_ind]=0.
+        nan_ind=numpy.isnan(self.weights)
+        inf_ind=numpy.isinf(self.weights)
+        self.weights[inf_ind]=0.
+##        self.weights[self.weights!=0]=1.
+##        self.weights[self.weights>50]=50.
+
+
+    def PerformPCA(self, method="PCA",colors=colors, max_iter=100, random_state=100, nan_filter=False,selection_method=None):
     ##    data=data[numpy.array( good_ind),:]
         self.colors=COlorBlindColors( colors)
         data=self.major_allele_proportion
@@ -230,13 +254,24 @@ path to such a file in the sample_file parameter."
 
 ##            data=data[:,~nan_ind]
     ##        pca=sklearn.decomposition.IncrementalPCA(92-len(bad_strains),whiten=True, copy=False,batch_size= 100)
+        if method=='PCA':
 
             pca=sklearn.decomposition.PCA(data.shape[0],whiten=True, copy=False)
+            transformed=pca.fit_transform(AlleleRescale( data))
         else:
-
-            pca=sklearn.decomposition.PCA(data.shape[0],whiten=True, copy=False)
+            #compute weights
+            self.ComputeWeights()
+            if method=='EMPCA':
+                pca=wpca.EMPCA(10,max_iter=max_iter,random_state=random_state)
+            elif method=='WPCA':
+                pca=wpca.WPCA(10)
+            rescaled=AlleleRescale( data)
+            sample_size=self.weights.shape[0]
+            isnan=numpy.isnan(rescaled.sum(0))*(( self.weights==0).sum(0)>=.7*sample_size)
+##            self.passed
+            transformed=pca.fit_transform(rescaled[:,~isnan], weights=self.weights[:,~isnan])
     ##    if partial_fit==False:
-        transformed=pca.fit_transform(AlleleRescale( data))
+
 
 
 
@@ -1597,7 +1632,7 @@ def JointFreqSpectrum(data, pop_assignments):
 
 
 def AlleleRescale(data,axis=0, std=False):
-    mean_f=numpy.mean(data,axis)
+    mean_f=numpy.nanmean(data,axis)
 ##    mean_f=data
     var_f=(mean_f*(1-mean_f))**.5
     if std==True: var_f=numpy.std(data,axis)

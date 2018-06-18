@@ -216,7 +216,7 @@ path to such a file in the sample_file parameter."
         self.major_allele = major_allele
 ##        self.FST=ComputeFst(self.pileup, self.pop)
 
-    def ComputeWeights(self):
+    def ComputeWeights(self, interpolate=True):
         N=self.pileup.sum(1)
         k=N*self.major_allele_proportion
         a=1+k
@@ -233,11 +233,10 @@ path to such a file in the sample_file parameter."
         nan_ind=numpy.isnan(self.weights)
         inf_ind=numpy.isinf(self.weights)
         self.weights[inf_ind]=0.
-##        self.weights[self.weights!=0]=1.
-##        self.weights[self.weights>50]=50.
+        if interpolate==True:
+            self.weights[ self.weights!=0.]=1.
 
-
-    def PerformPCA(self, method="PCA",colors=colors, max_iter=100, random_state=100, nan_filter=False,selection_method=None):
+    def PerformPCA(self, method="PCA", interpolate=True, colors=colors, max_iter=100, random_state=100, nan_filter=False,selection_method=None):
     ##    data=data[numpy.array( good_ind),:]
         self.colors=COlorBlindColors( colors)
         data=self.major_allele_proportion
@@ -260,7 +259,7 @@ path to such a file in the sample_file parameter."
             transformed=pca.fit_transform(AlleleRescale( data))
         else:
             #compute weights
-            self.ComputeWeights()
+            self.ComputeWeights(interpolate)
             if method=='EMPCA':
                 pca=wpca.EMPCA(10,max_iter=max_iter,random_state=random_state)
             elif method=='WPCA':

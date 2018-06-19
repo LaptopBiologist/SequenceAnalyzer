@@ -169,15 +169,21 @@ path to such a file in the sample_file parameter."
             but this was not a valid path."
             ignore=numpy.loadtxt(ignore, str)
         print self.samples
+        self.filter=numpy.array( [True]*len(self.samples))
+
         if ignore!=[]:
             good_indices=~numpy.isin(samples, ignore)
             snp_array=snp_array[good_indices]
+            self.filter[~good_indices]=False
             self.samples=self.samples[good_indices]
     #Check for samples without the repeat
+        self.color_filter=numpy.array( [True]*len(self.samples))
         read_counts=numpy.mean( snp_array.sum(1),1)
         good_indices=read_counts>=mean_cutoff
         snp_array=snp_array[good_indices]
         self.samples=self.samples[good_indices]
+        self.filter[self.filter==True][~good_indices]=False
+        self.color_filter[~good_indices]=False
         if type( pop_rule)==str:
             #File path
             pass
@@ -311,7 +317,7 @@ path to such a file in the sample_file parameter."
         comp2-=1
         transformed=self.components
         pca=self.PCA
-        pyplot.scatter(transformed[:,comp1], transformed[:,comp2], c=colors)
+        pyplot.scatter(transformed[:,comp1], transformed[:,comp2], c=self.colors[self.color_filter])
         pyplot.gca().set_aspect('equal')
 ##        pyplot.show()
 ##        trans_2=pca.fit_transform(AlleleRescale( data).transpose())
@@ -330,7 +336,7 @@ path to such a file in the sample_file parameter."
         pca=self.PCA
         fig=pyplot.figure()
         ax=mplot3d.axes3d.Axes3D(fig)
-        ax.scatter(transformed[:,0], transformed[:,1],transformed[:,2], c=colors, s=60)
+        ax.scatter(transformed[:,0], transformed[:,1],transformed[:,2], c=self.colors[self.color_filter], s=60)
 
         ax.set_xlabel('PC{0} ({1}%)'.format(comp1+1, numpy.round( pca.explained_variance_ratio_[comp1]*100, 3)))
         ax.set_ylabel('PC{0} ({1}%)'.format(comp2+1, numpy.round( pca.explained_variance_ratio_[comp2]*100, 3)))
@@ -356,7 +362,7 @@ path to such a file in the sample_file parameter."
         ax.set_aspect('equal')
     ##    ax.grid(False)
 
-        ax.scatter(pca.components_[pc1,:],pca.components_[pc2,:], c=colors, s=20, alpha=.9, zorder=2 )
+        ax.scatter(pca.components_[pc1,:],pca.components_[pc2,:], c=self.colors[self.color_filter], s=20, alpha=.9, zorder=2 )
         scale_1=numpy.max(abs(pca.components_[pc1,:]))/(numpy.max(abs( lin_fit[pc1])))
         scale_2=numpy.max(abs(pca.components_[pc2,:]))/(numpy.max(abs( lin_fit[pc2])))
         scale=min(scale_1,scale_2)

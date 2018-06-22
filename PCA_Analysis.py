@@ -162,13 +162,13 @@ path to such a file in the sample_file parameter."
 
         self.samples=numpy.loadtxt(sample_file, str)
 
-        print len( self.samples)
+##        print len( self.samples)
         snp_array=numpy.load(infile)
         if type( ignore)==str:
             assert os.path.exists(sample_file)==True, "A string was passed to the 'ignore' parameter,\
             but this was not a valid path."
             ignore=numpy.loadtxt(ignore, str)
-        print self.samples
+##        print self.samples
         self.filter=numpy.array( [True]*len(self.samples))
 
         if ignore!=[]:
@@ -188,7 +188,7 @@ path to such a file in the sample_file parameter."
             #File path
             pass
         self.pop=numpy.array( [s[:pop_rule] for s in self.samples])
-        print len(self.pop)
+##        print len(self.pop)
         num_samples=snp_array.shape[0]
         read_count=snp_array[:,:,:] .sum(1)
     ##    print read_count.shape
@@ -212,7 +212,7 @@ path to such a file in the sample_file parameter."
             var_pres.append(rej)
 
         self.pileup=snp_array
-        print self.pileup.shape
+##        print self.pileup.shape
         self.major_allele_proportion = major_allele_prop
         self.nan_filter=~numpy.isnan(self.major_allele_proportion.sum(0))
 ##        print self.pop
@@ -251,7 +251,7 @@ path to such a file in the sample_file parameter."
             #We are worried about nans
             data=data[:,self.nan_filter]
         if samples!='':
-            print 'b'
+##            print 'b'
             keep_ind=numpy.array( [bad_strains.count(s)==0 for s in self.samples])
             colors=numpy.array(colors)
             data=data
@@ -512,7 +512,7 @@ class LassoManager(object):
 ##        self.axes[1].scatter(range(len(self.CN_map[ind])),sorted( self.CN_map[ind]))
 ##        print self.xys[axind]
 ##        print ind.shape, self.x_list.shape
-        print numpy.array( self.sample_list) [ind]
+##        print numpy.array( self.sample_list) [ind]
 
 
         for i in range(len(self.xys[axind])):

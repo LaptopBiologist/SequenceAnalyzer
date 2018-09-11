@@ -14,7 +14,11 @@ from mpl_toolkits import mplot3d
 import matplotlib
 from matplotlib import pyplot
 import matplotlib.gridspec as gridspec
-
+from polo import optimal_leaf_ordering
+import fastcluster
+import hdbscan
+from scipy.spatial.distance import pdist
+from Bio import Seq
 import sklearn.decomposition
 import sklearn.neighbors
 import sklearn.linear_model
@@ -102,9 +106,51 @@ def set_style():
 
     matplotlib.rcParams['svg.fonttype'] = 'none'
 
+class TreeWalker():
+    def __init__(self, linkage):
+        self.linkage=linkage
+        self.tree=scipy.cluster.hierarchy.to_tree(linkage)
+        self.next_level=[self.tree ]
+        self.max_dist=self.tree.dist
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        distances=[node.dist for node in self.next_level]
+        ind_sort=numpy.argsort(distances)[::-1]
+        for ind in ind_sort:
+            if self.next_level[ind].is_leaf()==False: break
+        max_ind=ind
+        self.max_dist=numpy.max(distances)
+        new_level=[]
+        for i, node in enumerate(self.next_level):
+            if i==max_ind:
+                new_level.append(node.get_left())
+                new_level.append(node.get_right())
+            else:
+                new_level.append(node)
+
+        self.next_level=new_level
+
+        #Test if all nodes are leaves. If so, stop iteration
+        is_leaf=[1-node.is_leaf() for node in self.next_level]
+        if sum(is_leaf)==0:
+            raise StopIteration
+        else:
+            return self
+
+    def get_clusters(self):
+        clusters=[node.pre_order() for node in self.next_level]
+        return clusters
+
+
+
+
 
 class SequenceSummary():
-    def __init__(self, infile,ignore=[],sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=1,mean_cutoff=0, nan_filter=True):
+    nt_dict={0:"N",1:'A', 2:'T', 3:'C',4:'G'}
+    def __init__(self, infile,ignore=[],sample_file='', pop_rule=1 , FDR=.01, error_rate=1e-3, depth_cutoff=3,mean_cutoff=0, nan_filter=True, interpolate_mean=False):
         """Computes two statistics from the SNP pileup.
         First, it defines the major allele at each positions as the allele present at
         the highest average allele proportion across the populations. It
@@ -151,6 +197,10 @@ class SequenceSummary():
 
             major_allele: The major allele at each position"""
         #Determine the parent directory
+        if interpolate_mean==True:
+            self.cutoff_method='mean'
+        else:
+            self.cutoff_method='min'
         if sample_file=='':
             indir='/'.join( infile.split('/')[:-1])
             sample_file=indir+'/samples.tsv'
@@ -194,10 +244,19 @@ path to such a file in the sample_file parameter."
     ##    print read_count.shape
 
 
-        major_allele_prop,major_allele, all_pos=GetMajorAlleleFreq(snp_array, cutoff=depth_cutoff)
-        var_allele_prop=GetOtherAlleleProportion(snp_array, depth_cutoff, order=2)
+        major_allele_prop,major_allele, all_pos=GetMajorAlleleFreq(snp_array, cutoff=depth_cutoff, method=self.cutoff_method)
+        self.var_allele_prop, self.var_allele=GetOtherAlleleProportion(snp_array, depth_cutoff, order=2,method=self.cutoff_method)
+        self.var3_allele_prop, self.var3_allele=GetOtherAlleleProportion(snp_array, depth_cutoff, order=3,method=self.cutoff_method)
+        if interpolate_mean==True:
+            for i in range(major_allele_prop.shape[1]):
+                mean=numpy.nanmean(major_allele_prop[:,i])
+                var_mean=numpy.nanmean(self.var_allele_prop[:,i])
+                nan_ind=numpy.isnan( major_allele_prop[:,i])
+                major_allele_prop[nan_ind, i]=mean
+                nan_ind=numpy.isnan( self.var_allele_prop[:,i])
+                self.var_allele_prop[nan_ind, i]=var_mean
         read_count=read_count[:,all_pos]
-        var_counts=(read_count*var_allele_prop).astype(int)
+        var_counts=(read_count*self.var_allele_prop).astype(int)
         read_count=read_count.astype(int)
         min_cvg= numpy.min(read_count,0)
         allele_freq=[]
@@ -220,8 +279,49 @@ path to such a file in the sample_file parameter."
         self.variant_table = numpy.array( var_pres).transpose()
         self.passed_positions =  all_pos
         self.major_allele = major_allele
-##        self.FST=ComputeFst(self.pileup, self.pop)
+        try:
+            self.FST=ComputeFst(self.pileup, self.pop)
+        except:
+            pass
 
+    def AddCopyNumber(self,path):
+        if path!='':
+            self.CN_for_position=numpy.load(path)
+##            print self.filter
+            self.CN_for_position=self.CN_for_position[self.color_filter,:]
+        else:
+            self.CN_for_position=self.pileup.sum(1)
+        for sample in range(self.CN_for_position.shape[0]):
+            estimated_CN=self.CN_for_position[sample,:]
+            length=len(estimated_CN)
+            nan_positions=numpy.where( (numpy.isnan(estimated_CN)+numpy.isinf(estimated_CN))>0)[0]
+            estimated_CN[nan_positions]=numpy.nan
+            k=100
+
+            for position in nan_positions:
+                if position>k:
+                    left=position-k
+                else: left=0
+                if position<length-k:
+                    right=position+k
+
+                else:
+                    right=length
+
+                interpolating_value=numpy.nanmean(estimated_CN[left:right])
+                if numpy.isnan( interpolating_value)==True:
+                    interpolating_value=0
+                estimated_CN[position]=interpolating_value
+            self.CN_for_position[sample,:]=estimated_CN
+        proportions=self.pileup/self.pileup.sum(1)[:,None,:]
+        self.allele_CN=proportions*self.CN_for_position[:,None,:]
+        self.var_CN=numpy.ndarray((self.pileup.shape[0], self.pileup.shape[2]))
+        self.maj_CN=numpy.ndarray((self.pileup.shape[0], self.pileup.shape[2]))
+        self.var_CN.fill(0.)
+        self.maj_CN.fill(0.)
+        for i in range(self.pileup.shape[-1]):
+            self.var_CN[:,i]=self.allele_CN[:,self.var_allele[i],i]
+            self.maj_CN[:,i]=self.allele_CN[:,self.major_allele[i],i]
     def ComputeWeights(self, interpolate=True):
         N=self.pileup.sum(1)
         k=N*self.major_allele_proportion
@@ -301,7 +401,47 @@ path to such a file in the sample_file parameter."
 
 
         self.components, self.PCA, self.contributions, self.rescaled= transformed, pca, lin_fit, AlleleRescale(data)
+    def AddSequence(self,seq):
+        self.sequence=Seq.Seq(seq)
+        self.mut_sequence=Seq.MutableSeq(seq)
+    def GetMajorNucleotide(self, position, true_position=True):
+        if true_position==False:
+            pileup_ind=[self.passed_positions[position]]
+        else: pileup_ind=[position]
+##        print pileup_ind
+        if (self.passed_positions==pileup_ind[0]).sum()==0: return 'N'
+        if len (pileup_ind)!=0:
+            pileup_ind=pileup_ind[0]
+            allele_val=self.major_allele[pileup_ind]
+            if allele_val==0:
+                return 'N'
+            else:
 
+                return self.nt_dict[allele_val]
+        else:
+            return 'N'
+    def GetMinorNucleotide(self, position, true_position=True):
+        """Will return N in the following circumstances:
+            The position does not pass the test to call the presence of a variant
+        allele"""
+        if true_position==False:
+            pileup_ind=[self.passed_positions[position]]
+        else: pileup_ind=[position]
+##        print pileup_ind
+        if (self.passed_positions==pileup_ind[0]).sum()==0: return 'N'
+        if self.allele_frequency[numpy.where(self.passed_positions==pileup_ind[0])[0]]==0:
+            return 'N'
+
+        if len (pileup_ind)!=0:
+            pileup_ind=pileup_ind[0]
+            allele_val=self.var_allele[pileup_ind]
+            if allele_val==0:
+                return 'N'
+            else:
+
+                return self.nt_dict[allele_val]
+        else:
+            return 'N'
     def PlotScree(self):
         assert hasattr(self, 'PCA'), "The PerformPCA() method must be run before plotting PCA summaries."
 
@@ -376,6 +516,196 @@ path to such a file in the sample_file parameter."
         pyplot.xlabel('PC{0} ({1:.1f}%)'.format (pc1+1, numpy.round( pca.explained_variance_ratio_[pc1]*100, 3)), size=16)
         pyplot.ylabel('PC{0} ({1:.1f}%)'.format (pc2+1, numpy.round( pca.explained_variance_ratio_[pc2]*100, 3)), size=16)
 
+    def PlotHeatmap(self,figsize=(5,5), Rsquared=False):
+        if Rsquared==True:
+            r2_map=seaborn.clustermap(self.corr**2,  row_linkage=self.linkage, col_linkage=self.linkage,figsize=figsize)
+##            pyplot.show()
+            return r2_map
+
+        corr_map=seaborn.clustermap(self.corr,  row_linkage=self.linkage, col_linkage=self.linkage, cmap='RdBu_r', figsize=figsize)
+        return corr_map
+
+    def HierachicalCluster(self, var_cutoff=.5,p_cutoff=1e-5, linkage='average', clustering_cutoff=.3):
+        min_val=numpy.min(self.var_allele_prop,0)
+        max_val=numpy.max(self.var_allele_prop,0)
+        dist_val=abs(max_val-min_val)
+
+    #     std=numpy.std(summary.major_allele_proportion,0)
+        ind=numpy.where(dist_val>var_cutoff)[0]
+
+        if len(ind)>1000:linkage='single'
+##        sliced=self.pileup[:,:,ind]
+        var_cn=self.var_CN[:,self.passed_positions]
+##        sliced=self.var_allele_prop[:,ind]
+        sliced=var_cn[:,ind]
+        #filter out positions that cause NANs
+        test_corr=numpy.corrcoef(sliced.T)[:,0]
+##        nan_ind=(numpy.isnan(test_corr)+numpy.isinf(test_corr))>0
+        nan_ind=numpy.std(sliced,0)==0
+        ind=ind[~nan_ind]
+        sliced=var_cn[:,ind]
+        self.ind=ind
+##        sliced/=sliced.sum(1)[:,None,:]
+##        sliced_shape=sliced.shape
+##        sliced=numpy.reshape(sliced, (sliced_shape[0],sliced_shape[1]*sliced_shape[2]))
+        print sliced.shape
+        dist_mat=pdist( sliced.T, 'correlation')
+        dist_mat[numpy.isnan(dist_mat)]=0
+        corr=numpy.corrcoef(sliced.T)
+        linkage=fastcluster.linkage(dist_mat,'average')# 'single')
+        optimal_Z=optimal_leaf_ordering( linkage,dist_mat)
+        self.corr=corr
+        self.linkage=optimal_Z
+
+
+##        self.corr=self.corr[sorted_ind,:]
+##        self.corr=self.corr[:,sorted_ind]
+        clusters=[]
+
+##        clusters.append([sorted_ind[0]])
+        split_ind=[]
+        index=0
+
+        #Two-pass clustering; First cluster on liberal criteria
+        last_ind=0
+        curr_ind=0
+
+        self.slice_clusters=[]
+        tw=TreeWalker(optimal_Z)
+        sorted_ind=numpy.array( tw.get_clusters()[0])
+        self.sorted_ind=sorted_ind
+        sorted_mat=corr[:, sorted_ind]
+        sorted_mat=sorted_mat[sorted_ind,:]
+
+        self.FlattenClusters(clustering_cutoff)
+
+    def FlattenClusters(self, clustering_cutoff):
+        scores=[]
+        tw=TreeWalker(self.linkage)
+        for t in tw:
+##            if t.max_dist<clustering_cutoff: break
+            scores.append(self.EvaluateClusters(t.get_clusters(), cutoff=clustering_cutoff))
+        tw=TreeWalker(self.linkage)
+##        scores=[]
+        best=numpy.argmax(scores)
+        count=0
+        for t in tw:
+            if count>=best: break
+            count+=1
+
+##            if len(scores)>1 and scores[-1]>scores[-2]: break
+##        pyplot.close()
+##        pyplot.plot(scores)
+##        pyplot.show()
+        original_positions=t.get_clusters()
+        self.original_positions=original_positions
+        self.slice_clusters=[]
+        for c in original_positions:
+            self.slice_clusters.append(self.ind[ numpy.array( c).astype(int)])
+        self.clustered_positions=[]
+##        self.PlotClustersOnHeatmap(corr_map)
+        for clust in self.slice_clusters:
+            self.clustered_positions.append(self.passed_positions[numpy.array(clust)])
+
+##        self.slice_clusters=self.clustered_positions
+##        if plot==True:
+##            corr_size=corr.shape[0]
+##
+##            pyplot.show()
+##        else:
+##            pyplot.close()
+    def EvaluateClusters(self, clusters, cutoff=.3):
+        within_cluster_score=0.
+        total_score=(self.corr-cutoff).sum()
+        for c in clusters:
+            sliced_mat=self.corr[numpy.array(c),:]
+            sliced_mat=sliced_mat[:,numpy.array(c)]
+##            print sliced_mat.shape
+            within_cluster_score+=(sliced_mat-cutoff).sum()
+        within_cluster_score-=total_score
+        return within_cluster_score
+
+
+
+    def PlotClustersOnHeatmap(self,corr_map,comp=1,size_cutoff=5, nclusters=8, spec_cluster=None):
+        cluster_min_max=[]
+
+        seaborn.set_palette( seaborn.color_palette("hls", nclusters))
+        color_cycle=seaborn.color_palette("hls", nclusters)
+
+        mean_val=numpy.array( [abs(numpy.mean( (self.contributions[comp-1,c]))) for c in self.slice_clusters])
+        size_val=numpy.array( [len(c) for c in self.slice_clusters])
+        mean_val[size_val<size_cutoff]=0
+        length_sort=numpy.argsort(mean_val)[::-1]
+
+        self.sorted_ind=numpy.array( self.sorted_ind)
+        print 'plot'
+
+        for cluster in self.original_positions:
+            min_pos,max_pos=1e6, -1
+            for pos in cluster:
+                sorted_pos=numpy.where(self.sorted_ind==pos)[0]
+##                print pos
+                if sorted_pos<min_pos:
+                    min_pos=sorted_pos
+                if sorted_pos>max_pos:
+                    max_pos=sorted_pos
+            cluster_min_max.append((min_pos, max_pos))
+
+        count=0
+        for left,r in cluster_min_max:
+            right=r+1
+            cluster_ind=numpy.where( length_sort== count)[0][0]
+
+            if  cluster_ind<nclusters:
+                color=color_cycle[cluster_ind]
+            else:
+                color='black'
+            if spec_cluster!=None:
+                if count==spec_cluster:
+                    color='orange'
+                else:
+                    color='black'
+            count+=1
+            if color=='black': size=2
+            else: size=4
+            corr_map.ax_heatmap.plot([left,left], [left,right], c=color, lw=size, zorder=1)
+            corr_map.ax_heatmap.plot([left,right], [right,right], c=color,lw=size, zorder=1)
+##            corr_map.ax_heatmap.plot([left,left], [left,right], c='black', lw=6, zorder=1)
+##            corr_map.ax_heatmap.plot([left,right], [right,right], c='black',lw=6, zorder=1)
+            corr_map.ax_heatmap.plot([left,left], [right,left], c=color,lw=size, zorder=1)
+            corr_map.ax_heatmap.plot([right,left], [right,right], c=color,lw=size, zorder=1)
+
+
+
+    def PlotClusters(self):
+        lengths=[len(c) for c in self.clustered_positions]
+        length_sort=numpy.argsort(lengths)[::-1]
+        y=1
+        for i in length_sort:
+            xs=self.clustered_positions[i]
+            ys=[y]*len(xs)
+            pyplot.scatter(xs, ys)
+            y+=5
+        pyplot.show()
+    def PlotClustersOnContributions(self,comp=1, nclusters=8, size_cutoff=5, legend=False, anchor_comp=None):
+        seaborn.set_palette( seaborn.color_palette("hls", nclusters))
+        color_cycle=seaborn.color_palette("hls", nclusters)
+        if anchor_comp==None:
+            anchor_comp=comp
+        mean_val=numpy.array( [abs(numpy.mean( (self.contributions[anchor_comp-1,c]))) for c in self.slice_clusters])
+        size_val=numpy.array( [len(c) for c in self.slice_clusters])
+        mean_val[size_val<size_cutoff]=0
+        length_sort=numpy.argsort(mean_val)[::-1][:nclusters]
+        pyplot.scatter(self.passed_positions, self.contributions[comp-1,:],c='black')
+
+        for i, index in enumerate( length_sort):
+            pyplot.scatter(self.clustered_positions[index],
+            self.contributions[comp-1,self.slice_clusters[index]],c=color_cycle[ int(i)], edgecolor=color_cycle[ int(i)], label=index)
+        if legend==True:
+            leg=pyplot.legend()
+            leg.draggable()
+        pyplot.show()
 
     def BuildSequenceVariantTable(self,outfile, seq):
         rel_ind=numpy.where( self.allele_frequency>0)[0]
@@ -423,9 +753,9 @@ path to such a file in the sample_file parameter."
                 major_var_ind=numpy.argmax(mean_freq)
                 var_allele=inv_nt_dict[major_var_ind]
             except:
-                print mean_freq
-                print major_var_ind
-                print array[:,:,pos]
+##                print mean_freq
+##                print major_var_ind
+##                print array[:,:,pos]
                 continue
             mut_type=mut_classes[nt_classes[cons_allele]==nt_classes[var_allele]]
             entries=[pos, cons_allele, var_allele, mut_type, mean_major[index], std_major[index],min_major[index],var_freq[index]]#, fst[index] ]#,  lin_fit[0].coef_[lin_indices[index]], lin_fit[1].coef_[lin_indices[index]], lin_fit[2].coef_[lin_indices[index]]]
@@ -640,7 +970,7 @@ def EmptyFunction(data, ax=0):
     return data
 def DriveFxn( d):
     gen_dist= numpy.logspace(0, 2,100)
-    print gen_dist
+##    print gen_dist
     gen_dist=(1-numpy.exp(-2*gen_dist/100))/2.
 ##    pyplot.plot(gen_dist)
 ##    pyplot.show()
@@ -675,7 +1005,7 @@ def PlotSummaries(samples, labels,fxn, log=False,scatter=True, mask=[], mask_val
 ##        pyplot.boxplot(variances)
     if scatter==True:
         for i in range(len(variances)):
-            print numpy.nanmean(variances[i])
+##            print numpy.nanmean(variances[i])
             jitter=numpy.random.uniform(-1*width,width,size=len(variances[i]))
             pyplot.scatter(jitter+i, variances[i],s=15, c='orange', alpha=.6)
     pyplot.xticks(numpy.arange(0,len(labels)), labels, size=16)
@@ -712,12 +1042,48 @@ def BuildMajorConsensus(pos, major_ind, seq):
 ##            print
             consensus[seq_position]=seq[seq_position]
         else:
-            print p, seq[seq_position], inv_nt_dict[ind].upper()
+##            print p, seq[seq_position], inv_nt_dict[ind].upper()
             test.append( seq[seq_position]==inv_nt_dict[ind].upper())
             consensus[seq_position]=inv_nt_dict[ind].upper()
-    print numpy.mean(test)
+##    print numpy.mean(test)
 
     return ''.join( consensus)
+
+def PlotMajorAlleleProportion(summary,position,offset=-1.5):
+    color_set=set(summary.colors)
+    color_dict=dict(zip(color_set, numpy.arange(len(color_set))-.5))
+
+
+    freq1=summary.major_allele_proportion[:, position]
+##    print numpy.log10( freq1+offset)
+
+    color=numpy.array( summary.colors)
+    pop_dict=[]
+    color_set=sorted(list(set(color)))
+    pop_freq=[]
+    for c in color_set:
+        ind=(color==c)
+        pop_freq.append(numpy.log10( freq1+offset))
+##    seaborn.violinplot(data=pop_freq)
+    jitter=numpy.random.uniform(-.2, .2, size=len(ind))
+    x_pos=numpy.array( [color_dict[c] for c in color])
+##    print numpy.log10( freq1+offset)
+##    print x_pos
+##    pyplot.scatter(x_pos+jitter+.5, numpy.log10(1.- freq1+offset),c=color, s=80, alpha=.8)
+
+    pyplot.scatter(x_pos+jitter+offset,  freq1,c=color, s=80, alpha=.8)
+
+##    pyplot.ylabel('Cons Freq at Pos {0} + 1e-3.5 (Log10)'.format(pos1), size=20)
+
+    pyplot.xticks(numpy.arange(1,6),['B','I','N','T','Z'], size=20)
+    pyplot.yticks(size=20)
+    pyplot.xlim(.5, 5.5)
+##    pyplot.ylim(-3.6, .1)
+    pyplot.ylim(-.05, 1.05)
+##    pyplot.title(var1)
+##    else: color='firebrick'
+##    pyplot.show()
+
 
 def PlotMajorAlleleFreqByPopulation(table, pos_list, pos1, offset, pop=colors):
     color_dict={'firebrick':.5, 'forestgreen':1.5, 'blue':2.5, "orange":3.5,'purple':4.5}
@@ -726,7 +1092,7 @@ def PlotMajorAlleleFreqByPopulation(table, pos_list, pos1, offset, pop=colors):
 
 ##    freq1=table[ind, nt_dict[var1], pos1]/table[ind, :, pos1].sum(1)
     freq1=array
-    print freq1.shape
+##    print freq1.shape
 
 ##    print numpy.log10( freq1+offset)
     color=numpy.array( pop)
@@ -801,7 +1167,7 @@ def PlotBiplotPanel(pcas, shape, titles=[],pc=(0,1), colors=COlorBlindColors(col
     for x in range(shape[0]):
         for y in range(shape[1]):
 
-            print i
+##            print i
             ax_list.append(fig.add_subplot(gs[x,y]))
             ax_list[-1].set_aspect('equal', adjustable='datalim')
 ##            ax_list[-1]. locator_params(axis='x',nticks=5)
@@ -864,7 +1230,7 @@ def ComputeFst(snp_array,ax =0 , pop=colors):
     pop_count=numpy.array(pop_count)
     #Eq 10.a
     var_i=numpy.var(pop_means,0 )
-    print var_i
+##    print var_i
     exp_var_i=avg_prop*(1-avg_prop)
 ##    print exp_var_i[:,1519]
 ##    print var_i[:,1519]
@@ -872,12 +1238,12 @@ def ComputeFst(snp_array,ax =0 , pop=colors):
 ##    print fst_i[:,1519]
     #Eq 32.a
     fst=numpy.nansum( fst_i*exp_var_i,0)/h_t
-    print var_i.shape
-    print var_i[:,fst>1]
-    print avg_prop[:,fst>1]
-    print h_t[fst>1]
-##    print freq_array[:,:,fst>1]
-    print pop_count.shape
+##    print var_i.shape
+##    print var_i[:,fst>1]
+##    print avg_prop[:,fst>1]
+##    print h_t[fst>1]
+####    print freq_array[:,:,fst>1]
+##    print pop_count.shape
 
 ##    print fst[1519]
     fst[h_t==0]=0.
@@ -1049,7 +1415,7 @@ def PlotAlleleProportions(hist_freq, hist_pos, colors=colors, highlight=[] ):
         outlier=highlight!=0
         if outlier!=[] and highlight!=[]:
             f1=[ pyplot.scatter(hist_pos[:][outlier] +offset, rescale [i,:][outlier], c=c, edgecolors='dodgerblue',linewidths=1, s=80,  alpha=.7) for i in range(len(colors)) if colors[i]==c]
-        f1=[ pyplot.scatter(hist_pos[:]+offset, rescale [i,:], c=c, alpha=.7) for i in range(len(colors)) if colors[i]==c]
+        f1=[ pyplot.scatter(hist_pos[:]+offset, rescale [i,:], c=c,s=10, alpha=.7) for i in range(len(colors)) if colors[i]==c]
         offset+=.1
     pyplot.ylabel('Consensus Allele Frequency')
     pyplot.xlabel('Consensus Position')
@@ -1761,13 +2127,17 @@ def GetFreqArray(snp_array, cutoff=10):
 
     return freq_array, positions
 
-def GetMajorAlleleFreq(snp_array, cutoff=10):
+def GetMajorAlleleFreq(snp_array, cutoff=10, method='min'):
     cvg=snp_array.sum(1)
-    min_cvg=numpy.min(cvg,0)
+    if method=='min':
+        min_cvg=numpy.min(cvg,0)
+    if method=='mean':
+        min_cvg=numpy.mean(cvg,0)
+        min_cvg[numpy.isnan(min_cvg)]=0
 ##    pyplot.plot(min_cvg)
 ##    pyplot.show()
     good_ind=min_cvg>=cutoff
-    print good_ind
+##    print good_ind
     freq_table=snp_array/snp_array.sum(1)[:,None,:]
     pop_avg=numpy.mean(freq_table,0)
     ind=numpy.argmax(pop_avg,0)
@@ -1780,9 +2150,13 @@ def GetMajorAlleleFreq(snp_array, cutoff=10):
 
     return numpy.array([ freq_table[:,ind[ i],i] for i in numpy.where(good_ind==True)[0]]).transpose(),ind, positions
 
-def GetOtherAlleleProportion(snp_array, cutoff=10, order=2):
+def GetOtherAlleleProportion(snp_array, cutoff=10, order=2, method='min'):
     cvg=snp_array.sum(1)
-    min_cvg=numpy.min(cvg,0)
+    if method=='min':
+        min_cvg=numpy.min(cvg,0)
+    if method=='mean':
+        min_cvg=numpy.mean(cvg,0)
+        min_cvg[numpy.isnan(min_cvg)]=0
 ##    pyplot.plot(min_cvg)
 ##    pyplot.show()
     good_ind=min_cvg>=cutoff
@@ -1798,7 +2172,7 @@ def GetOtherAlleleProportion(snp_array, cutoff=10, order=2):
     positions=numpy.arange(snp_array.shape[2])[good_ind]
 
 
-    return numpy.array([ freq_table[:,ind[ i],i] for i in numpy.where(good_ind==True)[0]]).transpose()
+    return numpy.array([ freq_table[:,ind[ i],i] for i in numpy.where(good_ind==True)[0]]).transpose(), ind
 
 
 def GetSecondaryAlleleFreq(snp_array, cutoff=10):
@@ -2209,7 +2583,7 @@ def ChiTestRepeat(table, error_rate=1e-3):
 def MonteCarloTestRepeat(table,pos, reps=100, error_rate=1e-3, verbose=False):
     samples=table.shape[0]
     read_count=table[:,:,:] .sum(1)
-    print read_count.shape
+##    print read_count.shape
     read_count=read_count[:,pos]
 
     major_allele_prop,major_allele, all_pos=GetMajorAlleleFreq(table)
@@ -2274,9 +2648,135 @@ def MonteCarloOutlierTestRepeat(table,pos, reps=100, error_rate=1e-3, verbose=Fa
     return numpy.array( p_list)
 
 
+def PCASort(summary):
+    max_ind=numpy.argmax(abs(summary.contributions),0)
+    contrib=numpy.max(abs(summary.contributions),0)
+    sorted_ind=[]
+    n_components=summary.contributions.shape[0]
+    clust_ind=[]
+    for component in range(n_components):
+        indices=numpy.where(max_ind==component)[0]
+        argsort=numpy.argsort(contrib[indices])
+        sorted_ind+=list(indices[argsort])
+        clust_ind+=[component]*len(indices)
+    return numpy.array( sorted_ind), numpy.array(clust_ind)
+
+def CorrelationSortI(data):
+    corr=numpy.corrcoef(data.T)
+    sort_ind=[0]
+    n_data=corr.shape[0]
+    for i in range(n_data):
+        corr[i,i]=-1.1
+    for i in range(n_data):
+        best_hit=numpy.argmax(corr[sort_ind[-1],:])
+        sort_ind.append(best_hit)
+        corr[:,best_hit]=-1.1
+
+    sort_ind=numpy.array(sort_ind)
+    corr=numpy.corrcoef(data.T)
+    sorted_corr=corr[:, sort_ind]
+    sorted_corr=sorted_corr[sort_ind,:]
+    return sort_ind, sorted_corr
+
+def CorrelationSortII(data):
+    corr=numpy.corrcoef(data.T)
+    sort_ind=[0]
+    n_data=corr.shape[0]
+    available_ind=numpy.array([True]*n_data)
+    available_ind[0]=False
+
+    for k in range(n_data):
+        max_corr=-1.1
+        best_ind=-1
+        if sum(available_ind)==0: break
+        i=numpy.where(available_ind==True)[0][0]
+        correlations,p_vals, indices=[],[],[]
+        for j in range(n_data):
+            if available_ind[j]==False: continue
+            correlation,p_val=scipy.stats.pearsonr(corr[:,i],corr[:,j])
+            correlations.append(correlation)
+            p_vals.append(p_val)
+            indices.append(j)
+
+
+        indices=numpy.array(indices)
+        correlations=numpy.array(correlations)
+        p_vals=numpy.array(p_vals)
+        good_indices=(p_vals<=.001)*(correlations>0)
+##        print good_indices.sum()
+##        print correlations[numpy.argsort(correlations)[::-1]]
+##        print p_vals[numpy.argsort(correlations)[::-1]]
+##        print jabber
+        sort_ind+=list(indices[good_indices][numpy.argsort(correlations[good_indices])])
+        available_ind[indices[good_indices]]=False
+
+    sort_ind=numpy.array(sort_ind)
+    corr=numpy.corrcoef(data.T)
+    sorted_corr=corr[:, sort_ind]
+    sorted_corr=sorted_corr[sort_ind,:]
+    return sort_ind, sorted_corr
+
+
 def PagesTest(obs, exp):
     pass
 
+def AgglomerateDendrogram(linkage, corr, dist_cutoff=.4):
+    clusters=numpy.arange(corr.shape[0])
+    last_clust=max(clusters)+1
+    linkage_len=linkage.shape[0]
+    for i in range(linkage_len):
+        if linkage[i,2]>=dist_cutoff: break
+        parent_1=linkage[i,0]
+        parent_2=linkage[i,1]
+        clusters[clusters==parent_1]=last_clust
+        clusters[clusters==parent_2]=last_clust
+        last_clust+=1
+    return clusters
+
+def FindNonsynonymous(summary, seq, orf_beg, orf_end, positions=[]):
+    nt_list=[s for s in seq]
+    nt_list=['N']+nt_list
+    #Update to major alleles
+    for i in range(summary.pileup.shape[-1]):
+        nt=summary.GetMajorNucleotide(i)
+        if nt!='N':
+            nt_list[i]=nt
+
+    major_protein=str(Seq.Seq(''.join(nt_list)[orf_beg:orf_end]).translate())
+    print major_protein
+    synonynous=[]
+    stop=[]
+    if len(positions)==0:
+        positions=range(summary.pileup.shape[-1])[1:]
+    for i in positions:
+        minor_nt=summary.GetMinorNucleotide(i)
+        original_nt=nt_list[i]
+        if minor_nt!='N':
+            nt_list[i]=minor_nt
+        minor_prot=str(Seq.Seq(''.join(nt_list)[orf_beg:orf_end]).translate())
+        stop.append(minor_prot.find('*')>-1)
+        synonynous.append(minor_prot==major_protein)
+        nt_list[i]=original_nt
+    return synonynous, stop
+
+def BuildVariant(summary, seq, positions):
+    nt_list=[s for s in seq]
+    print nt_list.count("N")
+    nt_list=['N']+nt_list
+    #Update to major alleles
+    for i in range(summary.pileup.shape[-1]):
+        nt=summary.GetMajorNucleotide(i)
+        if nt!='N':
+            nt_list[i]=nt
+
+    print nt_list.count("N")
+    for i in positions:
+        minor_nt=summary.GetMinorNucleotide(i)
+
+        if minor_nt!='N':
+            nt_list[i]=minor_nt
+    print nt_list.count("N")
+    return ''.join(nt_list)
 
 def main(argv):
     param={}
